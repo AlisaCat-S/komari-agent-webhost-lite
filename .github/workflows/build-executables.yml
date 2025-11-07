@@ -22,7 +22,7 @@ jobs:
         # 使用 "include" 可以精确定义我们想要的每个组合
         include:
           # 1. Linux x64 (amd64)
-          - os: ubuntu-20.04
+          - os: ubuntu-22.04
             os_name: linux
             arch: x64
             
@@ -57,7 +57,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.9'
+          python-version: '3.10'
           # 根据矩阵中的 "arch" 动态选择 Python 架构
           architecture: ${{ matrix.arch }}
 
