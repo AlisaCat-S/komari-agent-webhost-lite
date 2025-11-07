@@ -1,0 +1,96 @@
+# 工作流名称
+name: Build Multi-Platform Executables
+
+# 触发工作流的事件
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  # 定义一个名为 "build" 的构建任务
+  build:
+    # 这个任务的名称将根据矩阵动态生成，例如 "Build (linux-x64)"
+    name: Build (${{ matrix.os_name }}-${{ matrix.arch }})
+    
+    # 关键：使用矩阵策略
+    strategy:
+      # 如果一个构建失败，不要取消其他正在进行的构建
+      fail-fast: false
+      matrix:
+        # 定义我们的构建矩阵
+        # 使用 "include" 可以精确定义我们想要的每个组合
+        include:
+          # 1. Linux x64 (amd64)
+          - os: ubuntu-20.04
+            os_name: linux
+            arch: x64
+            
+          # 2. Windows x64 (amd64)
+          - os: windows-latest
+            os_name: windows
+            arch: x64
+
+          # 3. Windows x86 (32-bit)
+          - os: windows-latest
+            os_name: windows
+            arch: x86
+
+          # 4. macOS x64 (Intel)
+          - os: macos-latest
+            os_name: macos-intel
+            arch: x64
+            
+          # 5. macOS arm64 (Apple Silicon M1/M2)
+          # 注意：我们需要一个运行在 arm64 架构上的 runner
+          - os: macos-14 
+            os_name: macos-arm
+            arch: arm64
+
+    # 根据矩阵中的 "os" 动态选择虚拟机环境
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
+          # 根据矩阵中的 "arch" 动态选择 Python 架构
+          architecture: ${{ matrix.arch }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # 假设你的 requirements.txt 仍在 py 目录下
+          pip install -r py/requirements.txt
+
+      - name: Install PyInstaller
+        run: pip install pyinstaller
+
+      - name: Build with PyInstaller
+        # 使用 shell 变量来处理不同平台的命名差异（例如 .exe 后缀）
+        run: |
+          # 1. 定义可执行文件的基础名称
+          EXECUTABLE_NAME="komari-agent-${{ matrix.os_name }}-${{ matrix.arch }}"
+          
+          # 2. 如果是 Windows 平台，添加 .exe 后缀
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            EXECUTABLE_NAME="$EXECUTABLE_NAME.exe"
+          fi
+          
+          echo "EXECUTABLE_NAME=$EXECUTABLE_NAME" >> $GITHUB_ENV
+          
+          # 3. 执行打包命令，使用新的文件名
+          # 假设你的主 Python 文件现在位于 py 目录下
+          pyinstaller --onefile --name "$EXECUTABLE_NAME" py/komari-agent-python.py
+          
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          # 制品的名称也设为动态的，方便区分
+          name: ${{ env.EXECUTABLE_NAME }}
+          # PyInstaller 的输出在 dist 目录下
+          path: dist/${{ env.EXECUTABLE_NAME }}
