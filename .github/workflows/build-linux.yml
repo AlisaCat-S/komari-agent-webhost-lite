@@ -1,0 +1,49 @@
+# 工作流名称
+name: Build Linux Executable
+# 触发工作流的事件
+on:
+  # 当推送到 main 分支时触发
+  push:
+    branches: [ "main" ]
+  # 允许在 GitHub Action 页面手动触发
+  workflow_dispatch:
+# 定义工作流中的任务
+jobs:
+  build:
+    # 指定运行任务的操作系统环境，使用最新的 Ubuntu 以确保良好的兼容性
+    runs-on: ubuntu-latest
+    # 定义任务的步骤
+    steps:
+      # 步骤 1: 检出代码
+      # 使用官方的 checkout action 来获取你的仓库代码
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      # 步骤 2: 设置 Python 环境
+      # 使用官方的 setup-python action 来配置指定版本的 Python
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.9' # 你可以根据需要选择 3.8, 3.9, 3.10 等版本
+      # 步骤 3: 安装依赖项
+      # 安装 requirements.txt 文件中列出的所有 Python 包
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r py/requirements.txt
+      # 步骤 4: 安装 PyInstaller
+      # PyInstaller 是将 Python 应用打包成独立可执行文件的核心工具
+      - name: Install PyInstaller
+        run: pip install pyinstaller
+      # 步骤 5: 使用 PyInstaller 打包
+      # --onefile: 将所有内容打包到单个可执行文件中
+      # --name: 指定输出的可执行文件名
+      # py/komari_agent.py: 你的主程序入口文件
+      - name: Build with PyInstaller
+        run: pyinstaller --onefile --name komari-agent-linux-amd64 py/komari-agent-python.py
+      # 步骤 6: 上传构建产物
+      # 将打包好的可执行文件作为 "artifact" 上传，方便下载
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: komari-agent-linux-amd64 # 上传文件的名称
+          path: dist/komari-agent-linux-amd64 # PyInstaller 默认将成品放在 dist 目录下
