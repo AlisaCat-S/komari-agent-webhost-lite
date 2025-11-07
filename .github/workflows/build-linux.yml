@@ -11,7 +11,7 @@ on:
 jobs:
   build:
     # 指定运行任务的操作系统环境，使用最新的 Ubuntu 以确保良好的兼容性
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-20.04
     # 定义任务的步骤
     steps:
       # 步骤 1: 检出代码
