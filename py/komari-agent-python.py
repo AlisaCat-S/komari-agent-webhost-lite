@@ -591,7 +591,7 @@ class EventHandler:
         message_type = event.get('message', '')
         
         Logger.info(f"收到服务器事件: {message_type}")
-        Logger.info(f"事件详情: {json.dumps(event, indent=2)}", 2)
+        Logger.info(f"事件详情: {json.dumps(event, indent=2)}")
         Logger.info(f"拒绝执行")
 
 
