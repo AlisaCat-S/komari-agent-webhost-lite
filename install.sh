@@ -10,6 +10,11 @@ readonly SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}"
 readonly VENV_DIR="${INSTALL_DIR}/venv"
 readonly APP_ENTRY="${INSTALL_DIR}/py/komari-agent-python.py"
 readonly REQUIREMENTS_FILE="${INSTALL_DIR}/requirements.txt"
+readonly DEFAULT_PIP_INDEXES=(
+    "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"
+    "https://mirrors.aliyun.com/pypi/simple/"
+    "https://pypi.org/simple"
+)
 
 HTTP_SERVER=""
 TOKEN=""
@@ -18,6 +23,7 @@ INCLUDE_NICS=""
 LOG_LEVEL="1"
 DISABLE_WEB_SSH="true"
 TMP_DIR=""
+SELECTED_PIP_INDEX=""
 
 log() {
     local type="$1"
@@ -58,6 +64,8 @@ Options:
   --log-level <level>                   Agent log level, default: 1
   --disable-web-ssh                     Disable remote control support, default behavior
   --enable-web-ssh                      Enable remote control support
+  Environment:
+    PIP_INDEX_URL                       Force a specific pip index URL
   -h, --help                            Show this help
 EOF
 }
@@ -179,6 +187,55 @@ find_python_command() {
     return 1
 }
 
+can_reach_url() {
+    local url="$1"
+    curl -fsSI --connect-timeout 5 --max-time 10 "${url}" >/dev/null 2>&1
+}
+
+pick_pip_indexes() {
+    if [ -n "${PIP_INDEX_URL:-}" ]; then
+        printf '%s\n' "${PIP_INDEX_URL}"
+        return
+    fi
+
+    local index
+    for index in "${DEFAULT_PIP_INDEXES[@]}"; do
+        printf '%s\n' "${index}"
+    done
+}
+
+run_pip_with_fallback() {
+    local pip_bin="$1"
+    shift
+
+    local index_url
+    local attempted=0
+    while IFS= read -r index_url; do
+        [ -n "${index_url}" ] || continue
+        attempted=1
+
+        if ! can_reach_url "${index_url}"; then
+            log "WARN" "pip source unreachable, skipping: ${index_url}"
+            continue
+        fi
+
+        log "INFO" "Trying pip source: ${index_url}"
+        if "${pip_bin}" "$@" -i "${index_url}"; then
+            SELECTED_PIP_INDEX="${index_url}"
+            return 0
+        fi
+
+        log "WARN" "pip command failed with source: ${index_url}"
+    done < <(pick_pip_indexes)
+
+    if [ "${attempted}" -eq 0 ]; then
+        log "ERROR" "No pip source candidates were available."
+    else
+        log "ERROR" "Failed to install dependencies from all configured pip sources."
+    fi
+    return 1
+}
+
 build_exec_start() {
     local args=(
         "${VENV_DIR}/bin/python"
@@ -222,9 +279,10 @@ install_app() {
     rm -rf "${VENV_DIR}"
     "${python_cmd}" -m venv "${VENV_DIR}"
 
-    log "INFO" "Installing Python dependencies"
-    "${VENV_DIR}/bin/pip" install --upgrade pip
-    "${VENV_DIR}/bin/pip" install -r "${REQUIREMENTS_FILE}"
+    log "INFO" "Installing Python dependencies with automatic pip source fallback"
+    run_pip_with_fallback "${VENV_DIR}/bin/pip" install --upgrade pip
+    run_pip_with_fallback "${VENV_DIR}/bin/pip" install -r "${REQUIREMENTS_FILE}"
+    log "INFO" "Selected pip source: ${SELECTED_PIP_INDEX}"
 }
 
 write_service() {
