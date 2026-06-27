@@ -247,30 +247,18 @@ class SystemInfoCollector:
         if not dev_name:
             return None
 
-        sd_match = re.match(r"^(sd[a-z]+)\d*$", dev_name)
-        if sd_match:
-            physical_name = sd_match.group(1)
-            return f"/dev/{physical_name}"
-
-        vd_match = re.match(r"^(vd[a-z]+)\d*$", dev_name)
-        if vd_match:
-            physical_name = vd_match.group(1)
-            return f"/dev/{physical_name}"
-
-        xvd_match = re.match(r"^(xvd[a-z]+)\d*$", dev_name)
-        if xvd_match:
-            physical_name = xvd_match.group(1)
-            return f"/dev/{physical_name}"
-
-        mmcblk_match = re.match(r"^(mmcblk\d+)p?\d*$", dev_name)
-        if mmcblk_match:
-            physical_name = mmcblk_match.group(1)
-            return f"/dev/{physical_name}"
-
-        nvme_match = re.match(r"^(nvme\d+n\d+)p?\d*$", dev_name)
-        if nvme_match:
-            physical_name = nvme_match.group(1)
-            return f"/dev/{physical_name}"
+        device_patterns = [
+            r"^(md[0-9]+)$",
+            r"^(sd[a-z]+)\d*$",
+            r"^(vd[a-z]+)\d*$",
+            r"^(xvd[a-z]+)\d*$",
+            r"^(mmcblk\d+)p?\d*$",
+            r"^(nvme\d+n\d+)p?\d*$",
+        ]
+        for pattern in device_patterns:
+            match = re.match(pattern, dev_name)
+            if match:
+                return f"/dev/{match.group(1)}"
 
         if not re.search(r"\d", dev_name):
             return device_path
@@ -405,6 +393,7 @@ class SystemInfoCollector:
                 r"^/dev/xvd[a-z]+$",
                 r"^/dev/nvme[0-9]+n[0-9]+$",
                 r"^/dev/mmcblk[0-9]+$",
+                r"^/dev/md[0-9]+$",
                 r"^zroot/.*$",
             ]
             is_physical_device = any(re.match(pattern, device) for pattern in physical_patterns)
@@ -698,7 +687,7 @@ class KomariMonitorClient:
         Logger.info("Basic info upload payload:")
         Logger.info(json.dumps(basic_info, indent=2))
         print(json.dumps(basic_info, indent=1))
-        Logger.debug(f"Uploading basic info to: {url}", 1)
+        Logger.debug("Uploading basic info to uploadBasicInfo endpoint", 1)
 
         try:
             async with aiohttp.ClientSession() as session:
@@ -791,14 +780,14 @@ class KomariMonitorClient:
 def parse_args() -> Dict[str, Any]:
     """Parse CLI arguments."""
     args = {
-        "http_server": "",
-        "token": "",
-        "interval": 1.0,
-        "reconnect_interval": 5,
-        "ignore_unsafe_cert": True,
-        "log_level": 0,
-        "disable_remote_control": False,
-        "include_nics": [],
+        "http_server": None,
+        "token": None,
+        "interval": None,
+        "reconnect_interval": None,
+        "ignore_unsafe_cert": None,
+        "log_level": None,
+        "disable_remote_control": None,
+        "include_nics": None,
     }
 
     argv = sys.argv[1:]
@@ -852,21 +841,26 @@ def parse_env_args() -> Dict[str, Any]:
 
 
 def merge_config(cli_config: dict, env_config: dict) -> dict:
-    filtered_cli = {k: v for k, v in cli_config.items() if v not in [None, "", []]}
-    return {**env_config, **filtered_cli}
+    merged = env_config.copy()
+    for key, value in cli_config.items():
+        if value is not None:
+            merged[key] = value
+    return merged
 
 
 def get_final_config() -> Dict[str, Any]:
     """Build the final runtime configuration."""
     cli_config = parse_args()
-    need_env = not cli_config["http_server"] or not cli_config["token"]
-    env_config = parse_env_args() if need_env else {}
-
+    env_config = parse_env_args()
     config = merge_config(cli_config, env_config)
     if not config["http_server"]:
         print("Error: --http-server is required, or set KOMARI_HTTP_SERVER.")
         _show_help()
         sys.exit(1)
+
+    http_server = config.get("http_server", "")
+    if isinstance(http_server, str):
+        config["http_server"] = http_server.rstrip("/")
 
     if not config["token"]:
         print("Error: --token is required, or set KOMARI_TOKEN.")
