@@ -1,29 +1,24 @@
 #!/bin/bash
-# use ./install_komari_agent.sh "你的HTTP服务器地址" "你的Token"
-# ==============================================================================
-# Komari Agent Lite - Installation Script
-#
-# Description: This script downloads the latest version of Komari Agent Lite,
-#              installs it as a systemd service, and starts it.
-# Author: Senior Software Engineer
-# Usage: sudo ./install_komari_agent.sh <http_server_address> <token>
-# Example: sudo ./install_komari_agent.sh "http://192.168.1.100:8080" "your-secret-token"
-# ==============================================================================
 
-# --- Script Configuration ---
-set -euo pipefail # -e: exit on error, -u: exit on unset variable, -o pipefail: fail pipeline on first error
+set -euo pipefail
 
-# --- Variable Definitions ---
 readonly REPO="AlisaCat-S/komari-agent-webhost-lite"
+readonly BRANCH="main"
 readonly INSTALL_DIR="/opt/komari-lite"
-readonly EXECUTABLE_NAME="komari-agent-linux-x64"
 readonly SERVICE_NAME="komari-agent-lite.service"
 readonly SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}"
-readonly TMP_DIR=$(mktemp -d) # Create a secure temporary directory
+readonly VENV_DIR="${INSTALL_DIR}/venv"
+readonly APP_ENTRY="${INSTALL_DIR}/py/komari-agent-python.py"
+readonly REQUIREMENTS_FILE="${INSTALL_DIR}/requirements.txt"
 
-# --- Function Definitions ---
+HTTP_SERVER=""
+TOKEN=""
+INSTALL_GHPROXY=""
+INCLUDE_NICS=""
+LOG_LEVEL="1"
+DISABLE_WEB_SSH="true"
+TMP_DIR=""
 
-# Function to print colored messages
 log() {
     local type="$1"
     local msg="$2"
@@ -31,7 +26,7 @@ log() {
     local color_green='\033[0;32m'
     local color_yellow='\033[0;33m'
     local color_blue='\033[0;34m'
-    local color_nc='\033[0m' # No Color
+    local color_nc='\033[0m'
 
     case "$type" in
         "INFO") echo -e "${color_blue}INFO:${color_nc} $msg" ;;
@@ -42,87 +37,210 @@ log() {
     esac
 }
 
-# Function to clean up temporary files on exit
-cleanup() {
-    log "INFO" "Cleaning up temporary directory: ${TMP_DIR}"
-    rm -rf "${TMP_DIR}"
+usage() {
+    cat <<EOF
+Komari Agent Lite installer
+
+Usage:
+  Legacy:
+    sudo bash install.sh <http_server_address> <token>
+
+  Main project compatible:
+    wget -qO- https://ghfast.top/raw.githubusercontent.com/${REPO}/refs/heads/${BRANCH}/install.sh | \\
+      sudo bash -s -- -e https://km.example.com -t TokenXXXXXXXXXXXX \\
+      --install-ghproxy https://ghfast.top --include-nics eth0
+
+Options:
+  -e, --endpoint, --http-server <url>   Komari server address
+  -t, --token <token>                   Komari token
+  --install-ghproxy <url>               Prefix GitHub/raw downloads with a proxy host
+  --include-nics <list>                 Comma-separated NIC allowlist passed to the agent
+  --log-level <level>                   Agent log level, default: 1
+  --disable-web-ssh                     Disable remote control support, default behavior
+  --enable-web-ssh                      Enable remote control support
+  -h, --help                            Show this help
+EOF
 }
-trap cleanup EXIT # Register the cleanup function to be called on script exit
 
-# --- Pre-flight Checks ---
+cleanup() {
+    if [ -n "${TMP_DIR:-}" ] && [ -d "${TMP_DIR}" ]; then
+        log "INFO" "Cleaning up temporary directory: ${TMP_DIR}"
+        rm -rf "${TMP_DIR}"
+    fi
+}
+trap cleanup EXIT
 
-# 1. Check for root privileges
-if [ "$(id -u)" -ne 0 ]; then
-   log "ERROR" "This script must be run as root. Please use 'sudo'."
-   exit 1
-fi
-
-# 2. Check for required command-line arguments
-if [ "$#" -ne 2 ]; then
-    log "ERROR" "Invalid arguments provided."
-    echo "Usage: $0 <http_server_address> <token>"
-    echo "Example: $0 \"http://192.168.1.100:8080\" \"your-secret-token\""
-    exit 1
-fi
-readonly HTTP_SERVER=$1
-readonly TOKEN=$2
-
-# 3. Check for necessary dependencies
-for cmd in curl unzip; do
-    if ! command -v $cmd &> /dev/null; then
-        log "ERROR" "Required command '$cmd' is not installed. Please install it first."
+require_value() {
+    local option="$1"
+    local value="${2:-}"
+    if [ -z "$value" ] || [[ "$value" == -* ]]; then
+        log "ERROR" "Option ${option} requires a value."
+        usage
         exit 1
     fi
-done
+}
 
-# --- Main Installation Logic ---
+parse_args() {
+    if [ "$#" -eq 2 ] && [[ "${1:-}" != -* ]] && [[ "${2:-}" != -* ]]; then
+        HTTP_SERVER="$1"
+        TOKEN="$2"
+        return
+    fi
 
-main() {
-    log "INFO" "Starting Komari Agent Lite installation..."
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            -e|--endpoint|--http-server)
+                require_value "$1" "${2:-}"
+                HTTP_SERVER="$2"
+                shift 2
+                ;;
+            -t|--token)
+                require_value "$1" "${2:-}"
+                TOKEN="$2"
+                shift 2
+                ;;
+            --install-ghproxy)
+                require_value "$1" "${2:-}"
+                INSTALL_GHPROXY="$2"
+                shift 2
+                ;;
+            --include-nics)
+                require_value "$1" "${2:-}"
+                INCLUDE_NICS="$2"
+                shift 2
+                ;;
+            --log-level)
+                require_value "$1" "${2:-}"
+                LOG_LEVEL="$2"
+                shift 2
+                ;;
+            --disable-web-ssh)
+                DISABLE_WEB_SSH="true"
+                shift
+                ;;
+            --enable-web-ssh)
+                DISABLE_WEB_SSH="false"
+                shift
+                ;;
+            -h|--help)
+                usage
+                exit 0
+                ;;
+            *)
+                log "ERROR" "Unknown argument: $1"
+                usage
+                exit 1
+                ;;
+        esac
+    done
 
-    # Step 1: Get the latest release download URL from GitHub API
-    log "INFO" "Fetching the latest release information from GitHub..."
-    local api_url="https://api.github.com/repos/${REPO}/releases/latest"
-    # Using grep and cut for portability, as jq might not be installed
-    local download_url=$(curl -s "$api_url" | grep "browser_download_url.*linux-x64.zip" | cut -d '"' -f 4)
-
-    if [ -z "$download_url" ]; then
-        log "ERROR" "Could not find the download URL for the latest linux-x64 release. Please check the repository."
+    if [ -z "${HTTP_SERVER}" ] || [ -z "${TOKEN}" ]; then
+        log "ERROR" "Both endpoint and token are required."
+        usage
         exit 1
     fi
-    log "INFO" "Latest version download URL: $download_url"
+}
 
-    # Step 2: Download and extract the agent
-    local zip_file="${TMP_DIR}/komari-agent-linux-x64.zip"
-    log "INFO" "Downloading agent to ${zip_file}..."
-    curl -L --progress-bar -o "$zip_file" "$download_url"
-
-    log "INFO" "Extracting agent in ${TMP_DIR}..."
-    unzip -q "$zip_file" -d "$TMP_DIR"
-
-    # Step 3: Stop existing service if it's running, to prevent file lock issues
-    if systemctl is-active --quiet "$SERVICE_NAME"; then
-        log "INFO" "Stopping existing service..."
-        systemctl stop "$SERVICE_NAME"
+apply_proxy() {
+    local url="$1"
+    if [ -z "${INSTALL_GHPROXY}" ]; then
+        printf '%s\n' "${url}"
+        return
     fi
-    
-    # Step 4: Install the binary
-    log "INFO" "Installing executable to ${INSTALL_DIR}/${EXECUTABLE_NAME}..."
-    mkdir -p "$INSTALL_DIR"
-    mv "${TMP_DIR}/${EXECUTABLE_NAME}" "${INSTALL_DIR}/"
-    chmod +x "${INSTALL_DIR}/${EXECUTABLE_NAME}"
 
-    # Step 5: Create the systemd service file
-    log "INFO" "Creating systemd service file at ${SERVICE_FILE}..."
+    local normalized_proxy="${INSTALL_GHPROXY%/}"
+    local normalized_url="${url#https://}"
+    normalized_url="${normalized_url#http://}"
+    printf '%s/%s\n' "${normalized_proxy}" "${normalized_url}"
+}
+
+download_source_files() {
+    local python_url
+    local requirements_url
+    python_url=$(apply_proxy "https://raw.githubusercontent.com/${REPO}/refs/heads/${BRANCH}/py/komari-agent-python.py")
+    requirements_url=$(apply_proxy "https://raw.githubusercontent.com/${REPO}/refs/heads/${BRANCH}/py/requirements.txt")
+
+    log "INFO" "Downloading lite agent source files"
+    mkdir -p "${INSTALL_DIR}/py"
+    curl -fL --progress-bar -o "${APP_ENTRY}" "${python_url}"
+    curl -fL --progress-bar -o "${REQUIREMENTS_FILE}" "${requirements_url}"
+}
+
+find_python_command() {
+    local candidates=("python3" "python")
+    local candidate
+    for candidate in "${candidates[@]}"; do
+        if command -v "${candidate}" >/dev/null 2>&1; then
+            printf '%s\n' "${candidate}"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+build_exec_start() {
+    local args=(
+        "${VENV_DIR}/bin/python"
+        "${APP_ENTRY}"
+        "--http-server" "${HTTP_SERVER}"
+        "--token" "${TOKEN}"
+        "--log-level" "${LOG_LEVEL}"
+    )
+
+    if [ "${DISABLE_WEB_SSH}" = "true" ]; then
+        args+=("--disable-web-ssh")
+    fi
+
+    if [ -n "${INCLUDE_NICS}" ]; then
+        args+=("--include-nics" "${INCLUDE_NICS}")
+    fi
+
+    local rendered=""
+    local arg
+    for arg in "${args[@]}"; do
+        rendered+="$(printf '%q' "${arg}") "
+    done
+
+    printf '%s\n' "${rendered% }"
+}
+
+install_app() {
+    local python_cmd="$1"
+
+    if systemctl is-active --quiet "${SERVICE_NAME}"; then
+        log "INFO" "Stopping existing service"
+        systemctl stop "${SERVICE_NAME}"
+    fi
+
+    log "INFO" "Preparing installation directory ${INSTALL_DIR}"
+    mkdir -p "${INSTALL_DIR}"
+    rm -rf "${INSTALL_DIR}/py" "${REQUIREMENTS_FILE}"
+    download_source_files
+
+    log "INFO" "Creating virtual environment"
+    rm -rf "${VENV_DIR}"
+    "${python_cmd}" -m venv "${VENV_DIR}"
+
+    log "INFO" "Installing Python dependencies"
+    "${VENV_DIR}/bin/pip" install --upgrade pip
+    "${VENV_DIR}/bin/pip" install -r "${REQUIREMENTS_FILE}"
+}
+
+write_service() {
+    local exec_start
+    exec_start=$(build_exec_start)
+
+    log "INFO" "Writing systemd service to ${SERVICE_FILE}"
     cat <<EOF > "${SERVICE_FILE}"
 [Unit]
-Description=Komari Agent Service lite
+Description=Komari Agent Lite
 After=network.target network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=${INSTALL_DIR}/${EXECUTABLE_NAME} --http-server "${HTTP_SERVER}" --token "${TOKEN}" --disable-web-ssh --log-level 1
+ExecStart=${exec_start}
 WorkingDirectory=${INSTALL_DIR}
 Restart=always
 RestartSec=10
@@ -131,23 +249,55 @@ User=root
 [Install]
 WantedBy=multi-user.target
 EOF
-
-    # Step 6: Reload systemd, enable and start the service
-    log "INFO" "Reloading systemd daemon..."
-    systemctl daemon-reload
-
-    log "INFO" "Enabling service to start on boot..."
-    systemctl enable "$SERVICE_NAME"
-
-    log "INFO" "Starting the service..."
-    systemctl start "$SERVICE_NAME"
-
-    log "SUCCESS" "Installation complete!"
-    log "INFO" "Checking the status of the service:"
-    # Give the service a moment to start up before checking status
-    sleep 2
-    systemctl status --no-pager "$SERVICE_NAME"
 }
 
-# --- Run the main function ---
-main
+check_environment() {
+    if [ "$(id -u)" -ne 0 ]; then
+        log "ERROR" "This script must be run as root. Please use sudo."
+        exit 1
+    fi
+
+    for cmd in curl systemctl mktemp rm mkdir; do
+        if ! command -v "${cmd}" >/dev/null 2>&1; then
+            log "ERROR" "Required command '${cmd}' is not installed."
+            exit 1
+        fi
+    done
+
+    if ! find_python_command >/dev/null; then
+        log "ERROR" "Python 3 is required but was not found in PATH."
+        exit 1
+    fi
+}
+
+main() {
+    parse_args "$@"
+    check_environment
+    TMP_DIR=$(mktemp -d)
+
+    log "INFO" "Starting Komari Agent Lite installation"
+    if [ -n "${INSTALL_GHPROXY}" ]; then
+        log "INFO" "Using GitHub proxy: ${INSTALL_GHPROXY}"
+    fi
+    if [ -n "${INCLUDE_NICS}" ]; then
+        log "INFO" "Restricting network statistics to NICs: ${INCLUDE_NICS}"
+    fi
+
+    local python_cmd
+    python_cmd=$(find_python_command)
+    log "INFO" "Using Python command: ${python_cmd}"
+
+    install_app "${python_cmd}"
+    write_service
+
+    log "INFO" "Reloading systemd daemon"
+    systemctl daemon-reload
+    systemctl enable "${SERVICE_NAME}" >/dev/null
+    systemctl restart "${SERVICE_NAME}"
+
+    log "SUCCESS" "Installation complete"
+    sleep 2
+    systemctl status --no-pager "${SERVICE_NAME}"
+}
+
+main "$@"

@@ -20,8 +20,13 @@ import psutil
 from datetime import datetime
 from typing import Dict, List, Optional, Any, Tuple
 from urllib.parse import urlparse
-import pty
-import select
+
+if platform.system() != "Windows":
+    import pty
+    import select
+else:
+    pty = None
+    select = None
 
 class Logger:
     """日志处理器"""
@@ -71,13 +76,14 @@ class SystemInfoCollector:
     
     VERSION = "komari-agent-python-1.0.0"
     
-    def __init__(self):
+    def __init__(self, include_nics: Optional[List[str]] = None):
         self.last_network_stats = {'rx': 0, 'tx': 0}
         self.total_network_up = 0
         self.total_network_down = 0
         self.last_network_time = time.time()
         self._cpu_initialized = False
         self._cpu_init_lock = asyncio.Lock()
+        self.include_nics = set(include_nics or [])
     
     async def get_basic_info(self) -> Dict[str, Any]:
         """获取基础系统信息"""
@@ -372,6 +378,9 @@ class SystemInfoCollector:
             
             # 遍历所有网卡，累加物理网卡的数据
             for interface, stats in net_io.items():
+                if self.include_nics and interface not in self.include_nics:
+                    Logger.debug(f"Skipping NIC not listed in include_nics: {interface}", 4)
+                    continue
                 # 检查是否为虚拟网卡
                 if any(pattern in interface for pattern in exclude_patterns):
                     Logger.debug(f"排除虚拟网卡: {interface}", 4)
@@ -601,7 +610,7 @@ class KomariMonitorClient:
     def __init__(self, config: Dict[str, Any]):
         self.config = config
         self.disable_remote_control = config.get('disable_remote_control', False)
-        self.system_info = SystemInfoCollector()
+        self.system_info = SystemInfoCollector(config.get('include_nics'))
         self.event_handler = EventHandler(config, self.disable_remote_control)
         self.last_basic_info_report = 0
         self.BASIC_INFO_INTERVAL = 300  # 5分钟
@@ -745,27 +754,41 @@ def parse_args() -> Dict[str, Any]:
         'reconnect_interval': 5,
         'ignore_unsafe_cert': True,
         'log_level': 0,
-        'disable_remote_control': False
+        'disable_remote_control': False,
+        'include_nics': []
     }
     
     argv = sys.argv[1:]
     i = 0
     while i < len(argv):
         arg = argv[i]
-        if arg == '--http-server' and i + 1 < len(argv):
+        if arg in ('--http-server', '--endpoint', '-e') and i + 1 < len(argv):
             args['http_server'] = argv[i + 1]
             i += 1
-        elif arg == '--token' and i + 1 < len(argv):
+        elif arg in ('--token', '-t') and i + 1 < len(argv):
             args['token'] = argv[i + 1]
             i += 1
         elif arg == '--interval' and i + 1 < len(argv):
             args['interval'] = float(argv[i + 1])
             i += 1
+        elif arg == '--reconnect-interval' and i + 1 < len(argv):
+            args['reconnect_interval'] = int(argv[i + 1])
+            i += 1
         elif arg == '--log-level' and i + 1 < len(argv):
             args['log_level'] = int(argv[i + 1])
             i += 1
+        elif arg == '--include-nics' and i + 1 < len(argv):
+            args['include_nics'] = [
+                nic.strip() for nic in argv[i + 1].split(',')
+                if nic.strip()
+            ]
+            i += 1
         elif arg == '--disable-web-ssh':
             args['disable_remote_control'] = True
+        elif arg == '--enable-web-ssh':
+            args['disable_remote_control'] = False
+        elif arg == '--install-ghproxy' and i + 1 < len(argv):
+            i += 1
         elif arg in ('--help', '-h'):
             _show_help()
             sys.exit(0)
@@ -782,7 +805,11 @@ def parse_env_args() -> Dict[str, Any]:
         'reconnect_interval': int(os.getenv('KOMARI_RECONNECT_INTERVAL', '10')),
         'ignore_unsafe_cert': os.getenv('KOMARI_IGNORE_UNSAFE_CERT', 'true').lower() != 'false',
         'log_level': int(os.getenv('KOMARI_LOG_LEVEL', '0')),
-        'disable_remote_control': os.getenv('KOMARI_DISABLE_REMOTE_CONTROL', 'false').lower() == 'true'
+        'disable_remote_control': os.getenv('KOMARI_DISABLE_REMOTE_CONTROL', 'false').lower() == 'true',
+        'include_nics': [
+            nic.strip() for nic in os.getenv('KOMARI_INCLUDE_NICS', '').split(',')
+            if nic.strip()
+        ]
     }
 
 def merge_config(cli_config: dict, env_config: dict) -> dict:
@@ -801,7 +828,6 @@ def get_final_config() -> Dict[str, Any]:
     env_config = parse_env_args() if need_env else {}
     
     config = merge_config(cli_config, env_config)
-    print(cli_config)
     if not config['http_server']:
         print("错误: 必须提供 --http-server 参数或设置 KOMARI_HTTP_SERVER 环境变量")
         _show_help()
