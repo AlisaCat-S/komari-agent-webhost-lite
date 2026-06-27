@@ -1,65 +1,67 @@
 # komari-agent-webhost-lite
 
-Lite agent for Komari deployments where running the main binary agent is inconvenient. This project now supports the main project installer command style, so you can replace only the repository URL and keep the same installation habit. The installer performs a source-based install: it downloads `py/komari-agent-python.py` and `py/requirements.txt` from this repository, creates a Python virtual environment under `/opt/komari-lite`, installs dependencies, and runs the lite agent with systemd.
+这是一个适用于 Komari 的 lite agent，适合不能方便运行主项目二进制 agent 的环境。当前已经兼容主项目的安装命令格式，你只需要把仓库地址替换成这个项目地址，就可以按主项目的习惯安装 lite 版。
 
-## Install
+安装脚本采用源码安装方式：会从本仓库下载 `py/komari-agent-python.py` 和 `py/requirements.txt`，在 `/opt/komari-lite` 下创建 Python 虚拟环境，安装依赖，并通过 `systemd` 启动 lite agent。
 
-Main project compatible example:
+## 安装
+
+兼容主项目格式的安装示例：
 
 ```bash
 wget -qO- https://ghfast.top/raw.githubusercontent.com/AlisaCat-S/komari-agent-webhost-lite/refs/heads/main/install.sh | sudo bash -s -- -e https://example.com -t TokenXXXXXXXXXXXX --install-ghproxy https://ghfast.top --include-nics eth0
 ```
 
-Legacy two-argument install is still supported:
+旧的双参数安装方式仍然可用：
 
 ```bash
 sudo bash install.sh https://example.com TokenXXXXXXXXXXXX
 ```
 
-## Installer options
+## 安装脚本参数
 
-| Option | Description |
+| 参数 | 说明 |
 | --- | --- |
-| `-e`, `--endpoint`, `--http-server <url>` | Komari server address |
+| `-e`, `--endpoint`, `--http-server <url>` | Komari 服务端地址 |
 | `-t`, `--token <token>` | Komari token |
-| `--install-ghproxy <url>` | Prefix raw GitHub source downloads with a proxy |
-| `--include-nics <list>` | Restrict network statistics to specific NICs, separated by commas |
-| `--log-level <level>` | Agent log level |
-| `--disable-web-ssh` | Compatibility flag. Remote control is already removed in lite agent |
-| `--enable-web-ssh` | Compatibility flag only. Lite agent does not provide remote control support |
+| `--install-ghproxy <url>` | 为 raw GitHub 源文件下载添加代理前缀 |
+| `--include-nics <list>` | 只统计指定网卡，多个网卡用逗号分隔 |
+| `--log-level <level>` | Agent 日志等级 |
+| `--disable-web-ssh` | 兼容参数。lite agent 已移除远程控制功能 |
+| `--enable-web-ssh` | 仅保留兼容性。lite agent 不提供远程控制功能 |
 
-## Installation result
+## 安装结果
 
-The installer creates:
+安装脚本会创建以下内容：
 
 - `/opt/komari-lite/py/komari-agent-python.py`
 - `/opt/komari-lite/venv`
 - `/etc/systemd/system/komari-agent-lite.service`
 
-## Agent runtime options
+## Agent 运行参数
 
-The packaged agent accepts both the original long options and the main-project compatible aliases:
+打包后的 lite agent 同时支持原始长参数和主项目兼容别名：
 
-| Option | Description |
+| 参数 | 说明 |
 | --- | --- |
-| `--http-server <url>` | Komari server address |
-| `-e`, `--endpoint <url>` | Alias of `--http-server` |
+| `--http-server <url>` | Komari 服务端地址 |
+| `-e`, `--endpoint <url>` | `--http-server` 的别名 |
 | `--token <token>` | Komari token |
-| `-t <token>` | Alias of `--token` |
-| `--interval <sec>` | Realtime report interval |
-| `--reconnect-interval <sec>` | Reconnect interval |
-| `--include-nics <list>` | Restrict network statistics to selected NICs |
-| `--disable-web-ssh` | Compatibility flag. Remote control is already removed in lite agent |
-| `--enable-web-ssh` | Compatibility flag only. Lite agent does not provide remote control support |
+| `-t <token>` | `--token` 的别名 |
+| `--interval <sec>` | 实时上报间隔 |
+| `--reconnect-interval <sec>` | 重连间隔 |
+| `--include-nics <list>` | 只统计指定网卡 |
+| `--disable-web-ssh` | 兼容参数。lite agent 已移除远程控制功能 |
+| `--enable-web-ssh` | 仅保留兼容性。lite agent 不提供远程控制功能 |
 
-## Remote control status
+## 远程控制状态
 
-Lite agent does not include remote execution or terminal control support.
+lite agent 不包含远程执行和终端控制功能。
 
-- Incoming control events are rejected.
-- `--disable-web-ssh`, `--enable-web-ssh`, and `KOMARI_DISABLE_REMOTE_CONTROL` are kept only for compatibility with main-project style commands and old configs.
+- 收到控制事件后会直接拒绝执行。
+- `--disable-web-ssh`、`--enable-web-ssh`、`KOMARI_DISABLE_REMOTE_CONTROL` 仅用于兼容主项目风格命令和旧配置。
 
-## Environment variables
+## 环境变量
 
 - `KOMARI_HTTP_SERVER`
 - `KOMARI_TOKEN`
