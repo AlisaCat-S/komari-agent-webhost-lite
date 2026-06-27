@@ -25,8 +25,8 @@ sudo bash install.sh https://example.com TokenXXXXXXXXXXXX
 | `--install-ghproxy <url>` | Prefix raw GitHub source downloads with a proxy |
 | `--include-nics <list>` | Restrict network statistics to specific NICs, separated by commas |
 | `--log-level <level>` | Agent log level |
-| `--disable-web-ssh` | Disable remote control support |
-| `--enable-web-ssh` | Enable remote control support |
+| `--disable-web-ssh` | Compatibility flag. Remote control is already removed in lite agent |
+| `--enable-web-ssh` | Compatibility flag only. Lite agent does not provide remote control support |
 
 ## Installation result
 
@@ -49,8 +49,15 @@ The packaged agent accepts both the original long options and the main-project c
 | `--interval <sec>` | Realtime report interval |
 | `--reconnect-interval <sec>` | Reconnect interval |
 | `--include-nics <list>` | Restrict network statistics to selected NICs |
-| `--disable-web-ssh` | Disable remote control support |
-| `--enable-web-ssh` | Enable remote control support |
+| `--disable-web-ssh` | Compatibility flag. Remote control is already removed in lite agent |
+| `--enable-web-ssh` | Compatibility flag only. Lite agent does not provide remote control support |
+
+## Remote control status
+
+Lite agent does not include remote execution or terminal control support.
+
+- Incoming control events are rejected.
+- `--disable-web-ssh`, `--enable-web-ssh`, and `KOMARI_DISABLE_REMOTE_CONTROL` are kept only for compatibility with main-project style commands and old configs.
 
 ## Environment variables
 
