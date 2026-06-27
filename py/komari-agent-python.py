@@ -2,8 +2,8 @@
 
 #
 # komari-agent-python by liming2038
-# 基础原则：不是有贡献就可以对普通用户指指点点，普通用户使用开源项目也有平等发声权力，不能打着维护原作者的旗号来贬低他人，远离饭圈文化。
-# 在平等、互相尊重基础上的使用本项目。
+# This fork keeps the lightweight monitoring client behavior and strips
+# remote control execution. Treat users and operators as peers.
 #
 
 import asyncio
@@ -18,8 +18,7 @@ import aiohttp
 import websockets
 import psutil
 from datetime import datetime
-from typing import Dict, List, Optional, Any, Tuple
-from urllib.parse import urlparse
+from typing import Dict, List, Optional, Any
 
 if platform.system() != "Windows":
     import pty
@@ -28,248 +27,253 @@ else:
     pty = None
     select = None
 
+
 class Logger:
-    """日志处理器"""
-    _log_level = 0  # 0=关闭Debug日志, 1=基本信息, 2=WebSocket传输，3=终端日志，4网络统计日志，5磁盘统计日志
-    
+    """Simple logger."""
+
+    _log_level = 0  # 0=off, 1=basic, 2=websocket, 3=terminal, 4=network, 5=disk
+
     @classmethod
     def set_log_level(cls, level: int):
-        """设置日志级别"""
+        """Set the current log level."""
         cls._log_level = level
-    
+
     @classmethod
     def _log(cls, message: str, level: str = "INFO"):
-        """基础日志方法"""
+        """Emit a log line."""
         if cls._log_level == 0 and level != "ERROR":
             return
-            
+
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         log_message = f"[{timestamp}] [{level}] {message}"
         print(log_message)
-        
+
         if level == "ERROR":
             print(log_message, file=sys.stderr)
-    
+
     @classmethod
     def debug(cls, message: str, debug_level: int = 1):
-        """调试日志"""
+        """Emit a debug log when the exact level matches."""
         if cls._log_level == debug_level:
             cls._log(message, "DEBUG")
-    
+
     @classmethod
     def info(cls, message: str):
-        """信息日志"""
+        """Emit an info log."""
         cls._log(message, "INFO")
-    
+
     @classmethod
     def warning(cls, message: str):
-        """警告日志"""
+        """Emit a warning log."""
         cls._log(message, "WARNING")
-    
+
     @classmethod
     def error(cls, message: str):
-        """错误日志"""
+        """Emit an error log."""
         cls._log(message, "ERROR")
 
+
 class SystemInfoCollector:
-    """系统信息收集器"""
-    
+    """Collect basic and realtime system information."""
+
     VERSION = "komari-agent-python-1.0.0"
-    
+
     def __init__(self, include_nics: Optional[List[str]] = None):
-        self.last_network_stats = {'rx': 0, 'tx': 0}
+        self.last_network_stats = {"rx": 0, "tx": 0}
         self.total_network_up = 0
         self.total_network_down = 0
         self.last_network_time = time.time()
         self._cpu_initialized = False
         self._cpu_init_lock = asyncio.Lock()
         self.include_nics = set(include_nics or [])
-    
+
     async def get_basic_info(self) -> Dict[str, Any]:
-        """获取基础系统信息"""
+        """Collect basic system metadata."""
         dist_info = self._get_linux_distribution()
-        
-        # 异步获取 IP 地址
+
         ipv4, ipv6 = await asyncio.gather(
             self._get_public_ip_v4(),
             self._get_public_ip_v6(),
-            return_exceptions=True
+            return_exceptions=True,
         )
-        
-        # 处理异常情况
+
         ipv4 = ipv4 if not isinstance(ipv4, Exception) else None
         ipv6 = ipv6 if not isinstance(ipv6, Exception) else None
-        
+
         if isinstance(ipv4, Exception):
-            Logger.debug(f"获取 IPv4 失败: {ipv4}", 1)
+            Logger.debug(f"Failed to get IPv4: {ipv4}", 1)
             ipv4 = None
         if isinstance(ipv6, Exception):
-            Logger.debug(f"获取 IPv6 失败: {ipv6}", 1)
+            Logger.debug(f"Failed to get IPv6: {ipv6}", 1)
             ipv6 = None
-        
-        os_name = f"{dist_info['name']} {dist_info['version']}" if dist_info['name'] != 'Unknown' else platform.system()
-        
+
+        os_name = (
+            f"{dist_info['name']} {dist_info['version']}"
+            if dist_info["name"] != "Unknown"
+            else platform.system()
+        )
+
         info = {
             "arch": platform.machine(),
             "cpu_cores": psutil.cpu_count(),
             "cpu_name": self._get_cpu_name(),
             "disk_total": await self._get_disk_total(),
-            "gpu_name": "",  # Python 暂不支持 GPU 检测
+            "gpu_name": "",
             "ipv4": ipv4,
             "ipv6": ipv6,
-            "mem_total": psutil.virtual_memory().total,  # 字节单位
+            "mem_total": psutil.virtual_memory().total,
             "os": os_name,
             "kernel_version": platform.release(),
-            "swap_total": psutil.swap_memory().total,  # 字节单位
+            "swap_total": psutil.swap_memory().total,
             "version": self.VERSION,
-            "virtualization": self._get_virtualization()
+            "virtualization": self._get_virtualization(),
         }
-        
-        Logger.debug(f"基础信息数据: {json.dumps(info, indent=2)}", 1)
+
+        Logger.debug(f"Basic info payload: {json.dumps(info, indent=2)}", 1)
         return info
-    
+
     async def get_realtime_info(self) -> Dict[str, Any]:
-        """获取实时监控信息"""
+        """Collect realtime monitoring data."""
         cpu_usage = await self._get_cpu_usage()
         network_stats = await self._get_network_stats()
         memory_info = await self._get_memory_info()
         disk_info = await self._get_disk_info()
-        
+
         info = {
             "cpu": {
                 "usage": cpu_usage
             },
             "ram": {
-                "total": memory_info["ram_total"],    # 字节
-                "used": memory_info["ram_used"]       # 字节
+                "total": memory_info["ram_total"],
+                "used": memory_info["ram_used"],
             },
             "swap": {
-                "total": memory_info["swap_total"],   # 字节
-                "used": memory_info["swap_used"]      # 字节
+                "total": memory_info["swap_total"],
+                "used": memory_info["swap_used"],
             },
             "load": {
-                "load1": round(psutil.getloadavg()[0] if hasattr(psutil, 'getloadavg') and psutil.getloadavg() else 0, 2),
-                "load5": round(psutil.getloadavg()[1] if hasattr(psutil, 'getloadavg') and psutil.getloadavg() else 0, 2),
-                "load15": round(psutil.getloadavg()[2] if hasattr(psutil, 'getloadavg') and psutil.getloadavg() else 0, 2)
+                "load1": round(psutil.getloadavg()[0] if hasattr(psutil, "getloadavg") and psutil.getloadavg() else 0, 2),
+                "load5": round(psutil.getloadavg()[1] if hasattr(psutil, "getloadavg") and psutil.getloadavg() else 0, 2),
+                "load15": round(psutil.getloadavg()[2] if hasattr(psutil, "getloadavg") and psutil.getloadavg() else 0, 2),
             },
             "disk": {
-                "total": disk_info["total"],          # 字节
-                "used": disk_info["used"]             # 字节
+                "total": disk_info["total"],
+                "used": disk_info["used"],
             },
             "network": {
                 "up": network_stats["up"],
                 "down": network_stats["down"],
                 "totalUp": network_stats["total_up"],
-                "totalDown": network_stats["total_down"]
+                "totalDown": network_stats["total_down"],
             },
             "connections": {
                 "tcp": await self._get_tcp_connections(),
-                "udp": await self._get_udp_connections()
+                "udp": await self._get_udp_connections(),
             },
             "uptime": int(time.time() - psutil.boot_time()),
             "process": len(psutil.pids()),
-            "message": ""
+            "message": "",
         }
-        
-        Logger.debug(f"实时监控数据: {json.dumps(info, indent=2)}", 2)
+
+        Logger.debug(f"Realtime info payload: {json.dumps(info, indent=2)}", 2)
         return info
-    
+
     def _get_cpu_name(self) -> str:
-        """获取 CPU 名称"""
+        """Return a best-effort CPU model name."""
         try:
             if platform.system() == "Windows":
                 import winreg
-                key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"HARDWARE\DESCRIPTION\System\CentralProcessor\0")
+
+                key = winreg.OpenKey(
+                    winreg.HKEY_LOCAL_MACHINE,
+                    r"HARDWARE\DESCRIPTION\System\CentralProcessor\0",
+                )
                 cpu_name = winreg.QueryValueEx(key, "ProcessorNameString")[0]
                 winreg.CloseKey(key)
                 return cpu_name.strip()
             else:
-                with open('/proc/cpuinfo', 'r') as f:
+                with open("/proc/cpuinfo", "r") as f:
                     for line in f:
-                        if line.strip().startswith('model name'):
-                            return line.split(':')[1].strip()
+                        if line.strip().startswith("model name"):
+                            return line.split(":")[1].strip()
         except Exception as e:
-            Logger.debug(f"获取CPU名称失败: {e}", 1)
-        
+            Logger.debug(f"Failed to get CPU name: {e}", 1)
+
         return "Unknown CPU"
-    
+
     async def _get_cpu_usage(self) -> float:
-        """获取 CPU 使用率 (非阻塞，基于初始化的基准)"""
+        """Return CPU usage without repeated blocking warmup."""
         async with self._cpu_init_lock:
             if not self._cpu_initialized:
-                # 第一次调用时，执行一次阻塞的 cpu_percent 来设置基准
-                # 这会在首次调用 get_realtime_info 时发生，只阻塞一次
-                psutil.cpu_percent(interval=0.1) # 这里阻塞0.1秒设置初始值
+                psutil.cpu_percent(interval=0.1)
                 self._cpu_initialized = True
-                # 返回0.0，因为这是第一次计算，没有可比较的前一个值
                 return 0.0
-        # 后续调用使用 interval=None，不阻塞，基于上一次的基准计算
+
         try:
             usage = psutil.cpu_percent(interval=None)
             return round(max(0, min(100, usage)), 2)
         except Exception as e:
-            Logger.debug(f"获取CPU使用率失败: {e}", 2)
-            return 0.0 # 出错时返回0
-    
+            Logger.debug(f"Failed to get CPU usage: {e}", 2)
+            return 0.0
+
     async def _get_memory_info(self) -> Dict[str, int]:
-        """获取内存信息（字节单位）"""
+        """Return memory totals in bytes."""
         try:
             virtual_memory = psutil.virtual_memory()
             swap_memory = psutil.swap_memory()
-            
+
             return {
                 "ram_total": virtual_memory.total,
                 "ram_used": virtual_memory.used,
                 "swap_total": swap_memory.total,
-                "swap_used": swap_memory.used
+                "swap_used": swap_memory.used,
             }
         except Exception as e:
-            Logger.debug(f"获取内存信息失败: {e}", 2)
+            Logger.debug(f"Failed to get memory info: {e}", 2)
             return {
                 "ram_total": 0,
                 "ram_used": 0,
                 "swap_total": 0,
-                "swap_used": 0
+                "swap_used": 0,
             }
-    
+
     def _get_physical_disk_device(self, device_path: str) -> Optional[str]:
         if platform.system() != "Linux":
             return device_path
 
-        import os
         import re
 
         dev_name = device_path.replace("/dev/", "")
         if not dev_name:
             return None
 
-        sd_match = re.match(r'^(sd[a-z]+)\d*$', dev_name)
+        sd_match = re.match(r"^(sd[a-z]+)\d*$", dev_name)
         if sd_match:
             physical_name = sd_match.group(1)
             return f"/dev/{physical_name}"
 
-        vd_match = re.match(r'^(vd[a-z]+)\d*$', dev_name)
+        vd_match = re.match(r"^(vd[a-z]+)\d*$", dev_name)
         if vd_match:
             physical_name = vd_match.group(1)
             return f"/dev/{physical_name}"
 
-        xvd_match = re.match(r'^(xvd[a-z]+)\d*$', dev_name)
+        xvd_match = re.match(r"^(xvd[a-z]+)\d*$", dev_name)
         if xvd_match:
             physical_name = xvd_match.group(1)
             return f"/dev/{physical_name}"
 
-        mmcblk_match = re.match(r'^(mmcblk\d+)p?\d*$', dev_name)
+        mmcblk_match = re.match(r"^(mmcblk\d+)p?\d*$", dev_name)
         if mmcblk_match:
             physical_name = mmcblk_match.group(1)
             return f"/dev/{physical_name}"
 
-        nvme_match = re.match(r'^(nvme\d+n\d+)p?\d*$', dev_name)
+        nvme_match = re.match(r"^(nvme\d+n\d+)p?\d*$", dev_name)
         if nvme_match:
             physical_name = nvme_match.group(1)
             return f"/dev/{physical_name}"
 
-        if not re.search(r'\d', dev_name):
-             return device_path
+        if not re.search(r"\d", dev_name):
+            return device_path
 
         sys_block_path = f"/sys/block/{dev_name}"
         if os.path.exists(sys_block_path):
@@ -277,7 +281,7 @@ class SystemInfoCollector:
             real_path = os.path.realpath(sys_block_path)
             if not os.path.isdir(real_path):
                 real_grandparent = os.path.dirname(real_parent)
-                if real_grandparent.endswith('/sys/block'):
+                if real_grandparent.endswith("/sys/block"):
                     physical_name = os.path.basename(real_parent)
                     if self._is_physical_disk(f"/dev/{physical_name}"):
                         return f"/dev/{physical_name}"
@@ -291,249 +295,298 @@ class SystemInfoCollector:
             seen_physical_devices = set()
 
             partitions = psutil.disk_partitions()
-            Logger.debug(f"获取到 {len(partitions)} 个分区", 5)
+            Logger.debug(f"Found {len(partitions)} partitions", 5)
             for partition in partitions:
                 device = partition.device
                 mountpoint = partition.mountpoint
                 fstype = partition.fstype
 
-                if fstype in {'tmpfs', 'devtmpfs', 'overlay', 'squashfs', 'proc', 'sysfs', 'debugfs', 'configfs', 'cgroup', 'cgroup2', 'pstore', 'bpf', 'tracefs', 'securityfs', 'efivarfs'}:
-                    Logger.debug(f"跳过虚拟文件系统: {fstype} (设备: {device}, 挂载点: {mountpoint})", 5)
+                if fstype in {
+                    "tmpfs",
+                    "devtmpfs",
+                    "overlay",
+                    "squashfs",
+                    "proc",
+                    "sysfs",
+                    "debugfs",
+                    "configfs",
+                    "cgroup",
+                    "cgroup2",
+                    "pstore",
+                    "bpf",
+                    "tracefs",
+                    "securityfs",
+                    "efivarfs",
+                }:
+                    Logger.debug(
+                        f"Skipping virtual filesystem: {fstype} "
+                        f"(device: {device}, mountpoint: {mountpoint})",
+                        5,
+                    )
                     continue
 
                 physical_device = self._get_physical_disk_device(device)
                 if not physical_device:
-                    Logger.debug(f"无法解析物理磁盘设备名，跳过分区: {device} (挂载点: {mountpoint})", 5)
+                    Logger.debug(
+                        f"Could not resolve physical disk for partition: {device} "
+                        f"(mountpoint: {mountpoint})",
+                        5,
+                    )
                     continue
 
                 if physical_device in seen_physical_devices:
-                    Logger.debug(f"物理磁盘 {physical_device} 已处理，跳过分区: {device} (挂载点: {mountpoint})", 5)
+                    Logger.debug(
+                        f"Physical disk already counted: {physical_device} "
+                        f"(partition: {device}, mountpoint: {mountpoint})",
+                        5,
+                    )
                     continue
 
                 if not self._is_physical_disk(physical_device):
-                    Logger.debug(f"设备 {physical_device} (来自分区 {device}) 不是物理磁盘，跳过", 5)
+                    Logger.debug(
+                        f"Skipping non-physical disk {physical_device} "
+                        f"(from partition {device})",
+                        5,
+                    )
                     continue
 
                 try:
                     usage = psutil.disk_usage(mountpoint)
                     Logger.debug(
-                        f"统计物理磁盘 {physical_device} (来自分区 {device}): 挂载点={mountpoint}, "
-                        f"总空间={usage.total} 字节, 已用={usage.used} 字节, 可用={usage.free} 字节, 使用率={usage.percent:.2f}%",
-                        5
+                        f"Counting physical disk {physical_device} from {device}: "
+                        f"mountpoint={mountpoint}, total={usage.total} bytes, "
+                        f"used={usage.used} bytes, free={usage.free} bytes, "
+                        f"usage={usage.percent:.2f}%",
+                        5,
                     )
                     total_bytes += usage.total
                     used_bytes += usage.used
-                    Logger.debug(f"当前累计统计量: 总空间={total_bytes} 字节, 已用={used_bytes} 字节", 5)
+                    Logger.debug(
+                        f"Current disk totals: total={total_bytes} bytes, "
+                        f"used={used_bytes} bytes",
+                        5,
+                    )
                     seen_physical_devices.add(physical_device)
                 except (PermissionError, OSError) as e:
-                    Logger.debug(f"跳过分区 {device}（挂载点: {mountpoint}, 物理磁盘: {physical_device}）: {e}", 5)
+                    Logger.debug(
+                        f"Skipping partition {device} (mountpoint: {mountpoint}, "
+                        f"physical disk: {physical_device}): {e}",
+                        5,
+                    )
                     continue
 
-            Logger.debug(f"磁盘统计完成 (按物理磁盘去重): 总空间={total_bytes} 字节, 已用={used_bytes} 字节", 5)
+            Logger.debug(
+                f"Disk statistics complete after dedupe: total={total_bytes} bytes, "
+                f"used={used_bytes} bytes",
+                5,
+            )
             return {
                 "total": total_bytes,
-                "used": used_bytes
+                "used": used_bytes,
             }
         except Exception as e:
-            Logger.debug(f"获取磁盘信息失败: {e}", 5)
+            Logger.debug(f"Failed to get disk info: {e}", 5)
             return {"total": 0, "used": 0}
-    
+
     async def _get_disk_total(self) -> int:
-        """获取磁盘总容量"""
+        """Return total disk capacity."""
         disk_info = await self._get_disk_info()
         return disk_info["total"]
-    
+
     def _is_physical_disk(self, device: str) -> bool:
         if platform.system() == "Windows":
-            return any(device.lower().startswith(drive) for drive in ['c:', 'd:', 'e:', 'f:', 'g:', 'h:'])
+            return any(device.lower().startswith(drive) for drive in ["c:", "d:", "e:", "f:", "g:", "h:"])
         else:
             import re
+
             physical_patterns = [
-                r'^/dev/sd[a-z]+$',
-                r'^/dev/vd[a-z]+$',
-                r'^/dev/xvd[a-z]+$',
-                r'^/dev/nvme[0-9]+n[0-9]+$',
-                r'^/dev/mmcblk[0-9]+$',
-                r'^zroot/.*$',
+                r"^/dev/sd[a-z]+$",
+                r"^/dev/vd[a-z]+$",
+                r"^/dev/xvd[a-z]+$",
+                r"^/dev/nvme[0-9]+n[0-9]+$",
+                r"^/dev/mmcblk[0-9]+$",
+                r"^zroot/.*$",
             ]
             is_physical_device = any(re.match(pattern, device) for pattern in physical_patterns)
             return is_physical_device
-    
+
     async def _get_network_stats(self) -> Dict[str, int]:
         """
-        使用 psutil 按网卡获取网络统计（推荐）
-        返回所有物理网卡的总和，排除虚拟网卡
+        Return aggregated physical NIC traffic statistics.
+
+        Virtual interfaces are excluded.
         """
         try:
-            # 获取所有网卡的IO统计
             net_io = psutil.net_io_counters(pernic=True)
             current_time = time.time()
-            
-            # 初始化累计变量
+
             total_current_rx = 0
             total_current_tx = 0
-            
-            # 定义要排除的虚拟网卡模式
-            exclude_patterns = ['lo', 'docker', 'veth', 'br-', 'tun', 'virbr']
-            
-            # 遍历所有网卡，累加物理网卡的数据
+
+            exclude_patterns = ["lo", "docker", "veth", "br-", "tun", "virbr"]
+
             for interface, stats in net_io.items():
                 if self.include_nics and interface not in self.include_nics:
                     Logger.debug(f"Skipping NIC not listed in include_nics: {interface}", 4)
                     continue
-                # 检查是否为虚拟网卡
                 if any(pattern in interface for pattern in exclude_patterns):
-                    Logger.debug(f"排除虚拟网卡: {interface}", 4)
+                    Logger.debug(f"Skipping virtual NIC: {interface}", 4)
                     continue
-                
-                Logger.debug(f"统计物理网卡 {interface}: RX={stats.bytes_recv}, TX={stats.bytes_sent}", 4)
+
+                Logger.debug(
+                    f"Counting physical NIC {interface}: "
+                    f"RX={stats.bytes_recv}, TX={stats.bytes_sent}",
+                    4,
+                )
                 total_current_rx += stats.bytes_recv
                 total_current_tx += stats.bytes_sent
-            
-            # 后续计算逻辑与之前相同（瞬时速率和累计流量）
-            # 第一次运行，初始化总流量为当前网卡累计值
-            if self.last_network_stats['rx'] == 0:
-                Logger.debug(f"第一次网络统计(psutil按网卡)，初始化总流量: 下载={total_current_rx}, 上传={total_current_tx}", 4)
+
+            if self.last_network_stats["rx"] == 0:
+                Logger.debug(
+                    f"Initializing network counters: "
+                    f"download={total_current_rx}, upload={total_current_tx}",
+                    4,
+                )
                 self.total_network_down = total_current_rx
                 self.total_network_up = total_current_tx
-                self.last_network_stats = {'rx': total_current_rx, 'tx': total_current_tx}
+                self.last_network_stats = {"rx": total_current_rx, "tx": total_current_tx}
                 self.last_network_time = current_time
-                
+
                 return {
                     "up": 0,
                     "down": 0,
                     "total_up": self.total_network_up,
-                    "total_down": self.total_network_down
+                    "total_down": self.total_network_down,
                 }
-            
-            # 计算瞬时速率
+
+            down_speed = 0.0
+            up_speed = 0.0
             time_diff = current_time - self.last_network_time
             if time_diff > 0:
-                down_speed = (total_current_rx - self.last_network_stats['rx']) / time_diff
-                up_speed = (total_current_tx - self.last_network_stats['tx']) / time_diff
-                
-                # 确保速率不为负
+                down_speed = (total_current_rx - self.last_network_stats["rx"]) / time_diff
+                up_speed = (total_current_tx - self.last_network_stats["tx"]) / time_diff
+
                 down_speed = max(0, down_speed)
                 up_speed = max(0, up_speed)
-                
-                # 更新总流量：直接使用当前网卡累计值
+
                 self.total_network_down = total_current_rx
                 self.total_network_up = total_current_tx
-                
-                Logger.debug(f"网络统计(psutil按网卡): 下载速度={int(down_speed)} B/s, 上传速度={int(up_speed)} B/s, 总下载={self.total_network_down}, 总上传={self.total_network_up}", 4)
-            
-            # 更新统计值
-            self.last_network_stats = {'rx': total_current_rx, 'tx': total_current_tx}
+
+                Logger.debug(
+                    f"Network stats: down={int(down_speed)} B/s, up={int(up_speed)} B/s, "
+                    f"total_down={self.total_network_down}, total_up={self.total_network_up}",
+                    4,
+                )
+
+            self.last_network_stats = {"rx": total_current_rx, "tx": total_current_tx}
             self.last_network_time = current_time
-            
+
             return {
                 "up": int(up_speed),
                 "down": int(down_speed),
                 "total_up": self.total_network_up,
-                "total_down": self.total_network_down
+                "total_down": self.total_network_down,
             }
-            
+
         except Exception as e:
-            Logger.debug(f"psutil 按网卡统计失败: {e}", 4)
+            Logger.debug(f"Failed to collect per-NIC network stats: {e}", 4)
             return {"up": 0, "down": 0, "total_up": 0, "total_down": 0}
-    
+
     async def _get_tcp_connections(self) -> int:
-        """获取 TCP 连接数"""
+        """Return TCP connection count."""
         try:
             if platform.system() == "Windows":
-                # Windows 使用 netstat 命令
                 result = subprocess.run(
-                    ['netstat', '-n', '-p', 'tcp'], 
-                    capture_output=True, 
-                    text=True, 
-                    timeout=5
+                    ["netstat", "-n", "-p", "tcp"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
                 )
-                count = len([line for line in result.stdout.split('\n') if 'ESTABLISHED' in line])
+                count = len([line for line in result.stdout.split("\n") if "ESTABLISHED" in line])
                 return count
             else:
-                # Linux 使用 psutil
-                connections = psutil.net_connections(kind='tcp')
-                return len([conn for conn in connections if conn.status == 'ESTABLISHED'])
+                connections = psutil.net_connections(kind="tcp")
+                return len([conn for conn in connections if conn.status == "ESTABLISHED"])
         except Exception as e:
-            Logger.debug(f"获取TCP连接数失败: {e}", 2)
+            Logger.debug(f"Failed to get TCP connection count: {e}", 2)
             return 0
-    
+
     async def _get_udp_connections(self) -> int:
-        """获取 UDP 连接数"""
+        """Return UDP connection count."""
         try:
             if platform.system() == "Windows":
                 result = subprocess.run(
-                    ['netstat', '-n', '-p', 'udp'], 
-                    capture_output=True, 
-                    text=True, 
-                    timeout=5
+                    ["netstat", "-n", "-p", "udp"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
                 )
-                count = len([line for line in result.stdout.split('\n') if 'UDP' in line and line.strip()])
+                count = len([line for line in result.stdout.split("\n") if "UDP" in line and line.strip()])
                 return count
             else:
-                connections = psutil.net_connections(kind='udp')
+                connections = psutil.net_connections(kind="udp")
                 return len(connections)
         except Exception as e:
-            Logger.debug(f"获取UDP连接数失败: {e}", 2)
+            Logger.debug(f"Failed to get UDP connection count: {e}", 2)
             return 0
-    
+
     def _get_linux_distribution(self) -> Dict[str, str]:
-        """获取 Linux 发行版信息"""
+        """Return Linux distribution info when available."""
         try:
             if platform.system() == "Linux":
-                if os.path.exists('/etc/os-release'):
-                    with open('/etc/os-release', 'r') as f:
+                if os.path.exists("/etc/os-release"):
+                    with open("/etc/os-release", "r") as f:
                         content = f.read()
-                    
-                    name = 'Unknown'
-                    version = 'Unknown'
-                    
-                    for line in content.split('\n'):
-                        if line.startswith('ID='):
-                            name = line.replace('ID=', '').replace('"', '').strip()
-                        elif line.startswith('VERSION_ID='):
-                            version = line.replace('VERSION_ID=', '').replace('"', '').strip()
-                    
-                    return {'name': name, 'version': version}
+
+                    name = "Unknown"
+                    version = "Unknown"
+
+                    for line in content.split("\n"):
+                        if line.startswith("ID="):
+                            name = line.replace("ID=", "").replace('"', "").strip()
+                        elif line.startswith("VERSION_ID="):
+                            version = line.replace("VERSION_ID=", "").replace('"', "").strip()
+
+                    return {"name": name, "version": version}
         except Exception:
             pass
-        
-        return {'name': 'Unknown', 'version': 'Unknown'}
-    
+
+        return {"name": "Unknown", "version": "Unknown"}
+
     def _get_virtualization(self) -> str:
-        """获取虚拟化信息"""
+        """Return best-effort virtualization type."""
         try:
             if platform.system() == "Linux":
-                if os.path.exists('/.dockerenv'):
-                    return 'Docker'
-                
-                if os.path.exists('/proc/1/cgroup'):
-                    with open('/proc/1/cgroup', 'r') as f:
+                if os.path.exists("/.dockerenv"):
+                    return "Docker"
+
+                if os.path.exists("/proc/1/cgroup"):
+                    with open("/proc/1/cgroup", "r") as f:
                         content = f.read()
-                        if 'docker' in content:
-                            return 'Docker'
-                        elif 'lxc' in content:
-                            return 'LXC'
-                
-                if os.path.exists('/proc/cpuinfo'):
-                    with open('/proc/cpuinfo', 'r') as f:
+                        if "docker" in content:
+                            return "Docker"
+                        elif "lxc" in content:
+                            return "LXC"
+
+                if os.path.exists("/proc/cpuinfo"):
+                    with open("/proc/cpuinfo", "r") as f:
                         content = f.read()
-                        if 'QEMU' in content or 'KVM' in content:
-                            return 'QEMU'
+                        if "QEMU" in content or "KVM" in content:
+                            return "QEMU"
         except Exception:
             pass
-        
-        return 'None'
-    
+
+        return "None"
+
     async def _get_public_ip_v4(self) -> Optional[str]:
-        """获取公网 IPv4 地址"""
+        """Return public IPv4 when available."""
         services = [
-            'https://api.ipify.org',
-            'https://icanhazip.com',
-            'https://checkip.amazonaws.com',
-            'https://ifconfig.me/ip',
+            "https://api.ipify.org",
+            "https://icanhazip.com",
+            "https://checkip.amazonaws.com",
+            "https://ifconfig.me/ip",
         ]
-        
+
         for service in services:
             try:
                 ip = await self._fetch_ip(service)
@@ -541,16 +594,16 @@ class SystemInfoCollector:
                     return ip
             except Exception:
                 continue
-        
+
         return None
-    
+
     async def _get_public_ip_v6(self) -> Optional[str]:
-        """获取公网 IPv6 地址"""
+        """Return public IPv6 when available."""
         services = [
-            'https://api6.ipify.org',
-            'https://icanhazip.com',
+            "https://api6.ipify.org",
+            "https://icanhazip.com",
         ]
-        
+
         for service in services:
             try:
                 ip = await self._fetch_ip(service)
@@ -558,29 +611,29 @@ class SystemInfoCollector:
                     return ip
             except Exception:
                 continue
-        
+
         return None
-    
+
     async def _fetch_ip(self, url: str) -> str:
-        """获取 IP 地址"""
+        """Fetch plain-text IP data from a service."""
         timeout = aiohttp.ClientTimeout(total=5)
         async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(url, headers={'User-Agent': self.VERSION}) as response:
+            async with session.get(url, headers={"User-Agent": self.VERSION}) as response:
                 if response.status == 200:
                     return (await response.text()).strip()
                 else:
                     raise Exception(f"HTTP {response.status}")
-    
+
     def _is_valid_ipv4(self, ip: str) -> bool:
-        """验证 IPv4 地址"""
+        """Validate an IPv4 string."""
         try:
             socket.inet_pton(socket.AF_INET, ip)
             return True
         except socket.error:
             return False
-    
+
     def _is_valid_ipv6(self, ip: str) -> bool:
-        """验证 IPv6 地址"""
+        """Validate an IPv6 string."""
         try:
             socket.inet_pton(socket.AF_INET6, ip)
             return True
@@ -589,352 +642,337 @@ class SystemInfoCollector:
 
 
 class EventHandler:
-    """事件处理器"""
-    
+    """Handle events sent by the server."""
+
     def __init__(self, config: Dict[str, Any], disable_remote_control: bool = False):
         self.config = config
         self.disable_remote_control = disable_remote_control
-    
+
     async def handle_event(self, event: Dict[str, Any]):
-        """处理事件"""
-        message_type = event.get('message', '')
-        
-        Logger.info(f"收到服务器事件: {message_type}")
-        Logger.info(f"事件详情: {json.dumps(event, indent=2)}")
-        Logger.info(f"拒绝执行")
+        """Log and reject remote-control style events."""
+        message_type = event.get("message", "")
+
+        Logger.info(f"Received server event: {message_type}")
+        Logger.info(f"Event payload: {json.dumps(event, indent=2)}")
+        Logger.info("Execution rejected")
 
 
 class KomariMonitorClient:
-    """主监控客户端"""
-    
+    """Main monitoring client."""
+
     def __init__(self, config: Dict[str, Any]):
         self.config = config
-        self.disable_remote_control = config.get('disable_remote_control', False)
-        self.system_info = SystemInfoCollector(config.get('include_nics'))
+        self.disable_remote_control = config.get("disable_remote_control", False)
+        self.system_info = SystemInfoCollector(config.get("include_nics"))
         self.event_handler = EventHandler(config, self.disable_remote_control)
         self.last_basic_info_report = 0
-        self.BASIC_INFO_INTERVAL = 300  # 5分钟
-    
+        self.BASIC_INFO_INTERVAL = 300
+
     async def run(self):
-        """运行监控客户端"""
-        Logger.info("启动 Komari 监控客户端 (Python 版本)")
+        """Run the monitoring client forever."""
+        Logger.info("Starting Komari monitor client (Python edition)")
         if self.disable_remote_control:
-            Logger.info("远程控制功能已禁用")
-        
+            Logger.info("Remote control support is disabled")
+
         while True:
             try:
                 await self._run_monitoring_cycle()
-                await asyncio.sleep(self.config.get('reconnect_interval', 5))
+                await asyncio.sleep(self.config.get("reconnect_interval", 5))
             except Exception as e:
-                Logger.error(f"监控周期出错: {e}")
-                Logger.info(f"{self.config.get('reconnect_interval', 5)}秒后重试...")
-                await asyncio.sleep(self.config.get('reconnect_interval', 5))
-    
+                Logger.error(f"Monitoring cycle failed: {e}")
+                Logger.info(f"Retrying in {self.config.get('reconnect_interval', 5)} seconds...")
+                await asyncio.sleep(self.config.get("reconnect_interval", 5))
+
     async def _run_monitoring_cycle(self):
-        """运行监控周期"""
+        """Run one monitor lifecycle."""
         basic_info_url = f"{self.config['http_server']}/api/clients/uploadBasicInfo?token={self.config['token']}"
-        ws_url = self.config['http_server'].replace('http', 'ws') + f"/api/clients/report?token={self.config['token']}"
-        
-        # 启动时立即上报基础信息
+        ws_url = self.config["http_server"].replace("http", "ws") + f"/api/clients/report?token={self.config['token']}"
+
         await self._push_basic_info(basic_info_url)
-        
-        # 启动 WebSocket 监控
         await self._start_websocket_monitoring(ws_url, basic_info_url)
-    
+
     async def _push_basic_info(self, url: str) -> bool:
-        """推送基础信息"""
+        """Upload the basic info payload."""
         basic_info = await self.system_info.get_basic_info()
-        
-        # 在推送前打印基础信息数据，按照指定格式
-        Logger.info("基础信息上报数据:")
+
+        Logger.info("Basic info upload payload:")
         Logger.info(json.dumps(basic_info, indent=2))
         print(json.dumps(basic_info, indent=1))
-        Logger.debug(f"推送基础信息到: {url}", 1)
-        
+        Logger.debug(f"Uploading basic info to: {url}", 1)
+
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.post(url, json=basic_info) as response:
                     if response.status in (200, 201):
-                        Logger.info("基础信息推送成功")
+                        Logger.info("Basic info upload succeeded")
                         self.last_basic_info_report = time.time()
                         return True
                     else:
-                        Logger.error(f"基础信息推送失败 - HTTP: {response.status}")
+                        Logger.error(f"Basic info upload failed - HTTP: {response.status}")
                         return False
         except Exception as e:
-            Logger.error(f"基础信息推送异常: {e}")
+            Logger.error(f"Basic info upload exception: {e}")
             return False
-    
+
     async def _start_websocket_monitoring(self, ws_url: str, basic_info_url: str):
-        """启动 WebSocket 监控"""
-        Logger.debug(f"启动 WebSocket 监控: {ws_url}", 2)
-        
+        """Start the websocket monitoring loop."""
+        Logger.debug(f"Starting WebSocket monitor: {ws_url}", 2)
+
         try:
             async with websockets.connect(ws_url) as websocket:
-                Logger.info("WebSocket 连接成功，开始监控")
-                
-                # 启动消息处理任务
+                Logger.info("WebSocket connected, monitoring started")
+
                 message_task = asyncio.create_task(self._handle_websocket_messages(websocket))
                 monitoring_task = asyncio.create_task(self._monitoring_loop(websocket, basic_info_url))
-                
-                # 等待任意任务完成
+
                 done, pending = await asyncio.wait(
                     [message_task, monitoring_task],
-                    return_when=asyncio.FIRST_COMPLETED
+                    return_when=asyncio.FIRST_COMPLETED,
                 )
-                
-                # 取消未完成的任务
+
                 for task in pending:
                     task.cancel()
-                
+
         except Exception as e:
-            Logger.error(f"WebSocket 监控异常: {e}")
+            Logger.error(f"WebSocket monitor exception: {e}")
         finally:
-            Logger.info("WebSocket 连接关闭")
-    
+            Logger.info("WebSocket connection closed")
+
     async def _handle_websocket_messages(self, websocket):
-        """处理 WebSocket 消息"""
+        """Receive and process websocket messages."""
         try:
             async for message in websocket:
                 try:
                     if isinstance(message, str):
                         event = json.loads(message)
-                        Logger.debug(f"收到服务器消息: {json.dumps(event, indent=2)}", 2)
+                        Logger.debug(f"Received server message: {json.dumps(event, indent=2)}", 2)
                         await self.event_handler.handle_event(event)
                     else:
-                        Logger.debug(f"收到二进制消息，长度: {len(message)}", 2)
+                        Logger.debug(f"Received binary message, length: {len(message)}", 2)
                 except Exception as e:
-                    Logger.error(f"处理WebSocket消息异常: {e}")
+                    Logger.error(f"Failed to handle WebSocket message: {e}")
         except Exception as e:
-            Logger.error(f"WebSocket消息循环异常: {e}")
-    
+            Logger.error(f"WebSocket receive loop exception: {e}")
+
     async def _monitoring_loop(self, websocket, basic_info_url: str):
-        """监控循环"""
+        """Send realtime metrics in a loop."""
         sequence = 0
-        interval = max(0.1, self.config.get('interval', 1.0))
-        
+        interval = max(0.1, self.config.get("interval", 1.0))
+
         while True:
             start_time = time.time()
-            
-            # 检查是否需要上报基础信息（5分钟一次）
+
             current_time = time.time()
             if current_time - self.last_basic_info_report >= self.BASIC_INFO_INTERVAL:
                 success = await self._push_basic_info(basic_info_url)
                 if success:
                     self.last_basic_info_report = current_time
                 else:
-                    # 如果推送失败，等待一段时间再重试，避免频繁重试
-                    self.last_basic_info_report = current_time - self.BASIC_INFO_INTERVAL + 30  # 30秒后重试
-            
-            # 获取并发送实时监控数据
+                    self.last_basic_info_report = current_time - self.BASIC_INFO_INTERVAL + 30
+
             realtime_info = await self.system_info.get_realtime_info()
-            
-            Logger.debug(f"准备发送实时数据: {json.dumps(realtime_info, indent=2)}", 2)
-            
+
+            Logger.debug(f"Sending realtime payload: {json.dumps(realtime_info, indent=2)}", 2)
+
             try:
                 await websocket.send(json.dumps(realtime_info))
                 sequence += 1
-                Logger.debug(f"第 {sequence} 条数据发送成功", 2)
+                Logger.debug(f"Sent realtime payload #{sequence}", 2)
             except Exception as e:
-                Logger.error(f"发送监控数据失败: {e}")
+                Logger.error(f"Failed to send monitoring payload: {e}")
                 break
-            
-            # 控制发送频率
+
             elapsed = time.time() - start_time
             sleep_time = max(0, interval - elapsed)
             if sleep_time > 0:
                 await asyncio.sleep(sleep_time)
 
+
 def parse_args() -> Dict[str, Any]:
-    """解析命令行参数"""
+    """Parse CLI arguments."""
     args = {
-        'http_server': '',
-        'token': '',
-        'interval': 1.0,
-        'reconnect_interval': 5,
-        'ignore_unsafe_cert': True,
-        'log_level': 0,
-        'disable_remote_control': False,
-        'include_nics': []
+        "http_server": "",
+        "token": "",
+        "interval": 1.0,
+        "reconnect_interval": 5,
+        "ignore_unsafe_cert": True,
+        "log_level": 0,
+        "disable_remote_control": False,
+        "include_nics": [],
     }
-    
+
     argv = sys.argv[1:]
     i = 0
     while i < len(argv):
         arg = argv[i]
-        if arg in ('--http-server', '--endpoint', '-e') and i + 1 < len(argv):
-            args['http_server'] = argv[i + 1]
+        if arg in ("--http-server", "--endpoint", "-e") and i + 1 < len(argv):
+            args["http_server"] = argv[i + 1]
             i += 1
-        elif arg in ('--token', '-t') and i + 1 < len(argv):
-            args['token'] = argv[i + 1]
+        elif arg in ("--token", "-t") and i + 1 < len(argv):
+            args["token"] = argv[i + 1]
             i += 1
-        elif arg == '--interval' and i + 1 < len(argv):
-            args['interval'] = float(argv[i + 1])
+        elif arg == "--interval" and i + 1 < len(argv):
+            args["interval"] = float(argv[i + 1])
             i += 1
-        elif arg == '--reconnect-interval' and i + 1 < len(argv):
-            args['reconnect_interval'] = int(argv[i + 1])
+        elif arg == "--reconnect-interval" and i + 1 < len(argv):
+            args["reconnect_interval"] = int(argv[i + 1])
             i += 1
-        elif arg == '--log-level' and i + 1 < len(argv):
-            args['log_level'] = int(argv[i + 1])
+        elif arg == "--log-level" and i + 1 < len(argv):
+            args["log_level"] = int(argv[i + 1])
             i += 1
-        elif arg == '--include-nics' and i + 1 < len(argv):
-            args['include_nics'] = [
-                nic.strip() for nic in argv[i + 1].split(',')
-                if nic.strip()
-            ]
+        elif arg == "--include-nics" and i + 1 < len(argv):
+            args["include_nics"] = [nic.strip() for nic in argv[i + 1].split(",") if nic.strip()]
             i += 1
-        elif arg == '--disable-web-ssh':
-            args['disable_remote_control'] = True
-        elif arg == '--enable-web-ssh':
-            args['disable_remote_control'] = False
-        elif arg == '--install-ghproxy' and i + 1 < len(argv):
+        elif arg == "--disable-web-ssh":
+            args["disable_remote_control"] = True
+        elif arg == "--enable-web-ssh":
+            args["disable_remote_control"] = False
+        elif arg == "--install-ghproxy" and i + 1 < len(argv):
             i += 1
-        elif arg in ('--help', '-h'):
+        elif arg in ("--help", "-h"):
             _show_help()
             sys.exit(0)
         i += 1
-    
+
     return args
 
+
 def parse_env_args() -> Dict[str, Any]:
-    """解析环境变量"""
+    """Parse environment-based configuration."""
     return {
-        'http_server': os.getenv('KOMARI_HTTP_SERVER', ''),
-        'token': os.getenv('KOMARI_TOKEN', ''),
-        'interval': float(os.getenv('KOMARI_INTERVAL', '5.0')),
-        'reconnect_interval': int(os.getenv('KOMARI_RECONNECT_INTERVAL', '10')),
-        'ignore_unsafe_cert': os.getenv('KOMARI_IGNORE_UNSAFE_CERT', 'true').lower() != 'false',
-        'log_level': int(os.getenv('KOMARI_LOG_LEVEL', '0')),
-        'disable_remote_control': os.getenv('KOMARI_DISABLE_REMOTE_CONTROL', 'false').lower() == 'true',
-        'include_nics': [
-            nic.strip() for nic in os.getenv('KOMARI_INCLUDE_NICS', '').split(',')
-            if nic.strip()
-        ]
+        "http_server": os.getenv("KOMARI_HTTP_SERVER", ""),
+        "token": os.getenv("KOMARI_TOKEN", ""),
+        "interval": float(os.getenv("KOMARI_INTERVAL", "5.0")),
+        "reconnect_interval": int(os.getenv("KOMARI_RECONNECT_INTERVAL", "10")),
+        "ignore_unsafe_cert": os.getenv("KOMARI_IGNORE_UNSAFE_CERT", "true").lower() != "false",
+        "log_level": int(os.getenv("KOMARI_LOG_LEVEL", "0")),
+        "disable_remote_control": os.getenv("KOMARI_DISABLE_REMOTE_CONTROL", "false").lower() == "true",
+        "include_nics": [nic.strip() for nic in os.getenv("KOMARI_INCLUDE_NICS", "").split(",") if nic.strip()],
     }
+
 
 def merge_config(cli_config: dict, env_config: dict) -> dict:
-    # 只保留非空命令行参数
-    filtered_cli = {
-        k: v for k, v in cli_config.items()
-        if v not in [None, '', []]
-    }
-    # 环境变量作为基础，命令行参数覆盖非空项
+    filtered_cli = {k: v for k, v in cli_config.items() if v not in [None, "", []]}
     return {**env_config, **filtered_cli}
 
+
 def get_final_config() -> Dict[str, Any]:
-    """获取最终配置"""
+    """Build the final runtime configuration."""
     cli_config = parse_args()
-    need_env = not cli_config['http_server'] or not cli_config['token']
+    need_env = not cli_config["http_server"] or not cli_config["token"]
     env_config = parse_env_args() if need_env else {}
-    
+
     config = merge_config(cli_config, env_config)
-    if not config['http_server']:
-        print("错误: 必须提供 --http-server 参数或设置 KOMARI_HTTP_SERVER 环境变量")
+    if not config["http_server"]:
+        print("Error: --http-server is required, or set KOMARI_HTTP_SERVER.")
         _show_help()
         sys.exit(1)
-    
-    if not config['token']:
-        print("错误: 必须提供 --token 参数或设置 KOMARI_TOKEN 环境变量")
+
+    if not config["token"]:
+        print("Error: --token is required, or set KOMARI_TOKEN.")
         _show_help()
         sys.exit(1)
-    
+
     return config
 
+
 def _show_help():
-    """显示帮助信息"""
+    """Print help text."""
     print("komari-agent-python 1.0.0")
     print()
-    print("用法: python komari_agent.py --token <token> [选项]")
+    print("Usage: python komari_agent.py --token <token> [options]")
     print()
-    print("选项:")
-    print("  --http-server <url>        服务器地址 (也可通过 KOMARI_HTTP_SERVER 环境变量设置) (必须)")
-    print("  --token <token>            认证令牌 (也可通过 KOMARI_TOKEN 环境变量设置) (必须)")
-    print("  --interval <sec>           实时数据上报间隔 (默认: 1.0秒，可通过 KOMARI_INTERVAL 环境变量设置)")
-    print("  --log-level <level>        日志级别: 0=关闭Debug日志, 1=基本信息, 2=WebSocket传输，3=终端日志，4网络统计日志，5磁盘统计日志")
-    print("  --disable-web-ssh          禁用远程控制功能 (远程执行和终端)")
-    print("  --help                     显示此帮助信息")
+    print("Options:")
+    print("  --http-server <url>        Server URL (or KOMARI_HTTP_SERVER) [required]")
+    print("  --token <token>            Auth token (or KOMARI_TOKEN) [required]")
+    print("  --interval <sec>           Realtime report interval in seconds (default: 1.0)")
+    print("  --reconnect-interval <sec> Reconnect interval in seconds")
+    print("  --log-level <level>        0=off, 1=basic, 2=websocket, 3=terminal, 4=network, 5=disk")
+    print("  --include-nics <list>      Comma-separated NIC allowlist")
+    print("  --disable-web-ssh          Keep remote control disabled")
+    print("  --enable-web-ssh           Compatibility flag only; remote control is still unavailable")
+    print("  --help                     Show this help")
     print()
-    print("环境变量配置:")
-    print("  所有命令行参数均可通过环境变量设置，环境变量优先级低于命令行参数。")
+    print("Environment:")
+    print("  CLI arguments override environment variables when both are present.")
+
 
 async def check_environment() -> bool:
-    """检查运行环境"""
-    print("正在检查运行环境...")
-    
+    """Check runtime prerequisites."""
+    print("Checking runtime environment...")
+
     errors = []
     warnings = []
-    
-    # 检查 Python 版本
+
     python_version = sys.version_info
     if python_version < (3, 7):
-        errors.append("需要 Python 3.7 或更高版本")
+        errors.append("Python 3.7 or newer is required.")
     else:
-        print(f"✅ Python 版本: {python_version.major}.{python_version.minor}.{python_version.micro}")
-    
-    # 检查必要模块
+        print(f"[OK] Python version: {python_version.major}.{python_version.minor}.{python_version.micro}")
+
     required_modules = [
-        ('aiohttp', 'aiohttp'),
-        ('websockets', 'websockets'), 
-        ('psutil', 'psutil')
+        ("aiohttp", "aiohttp"),
+        ("websockets", "websockets"),
+        ("psutil", "psutil"),
     ]
-    
+
     for module_name, package_name in required_modules:
         try:
             __import__(package_name)
-            print(f"✅ 模块 {module_name} 可用")
+            print(f"[OK] Python module available: {module_name}")
         except ImportError:
-            errors.append(f"缺少必要模块: {module_name}，请运行: pip install {package_name}")
-    
-    # 检查系统命令
+            errors.append(f"Missing required module: {module_name}. Install with: pip install {package_name}")
+
     if platform.system() != "Windows":
-        required_commands = ['ping']
+        required_commands = ["ping"]
         for cmd in required_commands:
             try:
-                subprocess.run(['which', cmd], capture_output=True, check=True)
-                print(f"✅ 系统命令 {cmd} 可用")
+                subprocess.run(["which", cmd], capture_output=True, check=True)
+                print(f"[OK] System command available: {cmd}")
             except subprocess.CalledProcessError:
-                warnings.append(f"缺少系统命令: {cmd}，部分功能可能受限")
-    
-    # 检查 PTY 支持
+                warnings.append(f"Missing system command: {cmd}. Some features may be limited.")
+
     if platform.system() != "Windows":
         try:
             import pty
-            print("✅ PTY 终端支持可用")
+
+            print("[OK] PTY support available")
         except ImportError:
-            warnings.append("PTY 支持不可用，终端功能将受限")
-    
+            warnings.append("PTY support is unavailable. Terminal features may be limited.")
+
     if warnings:
-        print("\n⚠️  警告:")
+        print("\n[WARN] Warnings:")
         for warning in warnings:
-            print(f"   - {warning}")
-    
+            print(f"  - {warning}")
+
     if errors:
-        print("\n❌ 环境检查失败，发现以下问题:")
+        print("\n[ERROR] Environment check failed:")
         for error in errors:
-            print(f"   - {error}")
+            print(f"  - {error}")
         return False
-    
-    print("✅ 环境检查通过，所有依赖项均可用")
+
+    print("[OK] Environment check passed")
     return True
 
+
 async def main():
-    """主函数"""
+    """Program entrypoint."""
     try:
         config = get_final_config()
-        
-        # 环境检查并启动监控
+
         if await check_environment():
-            Logger.set_log_level(config['log_level'])
+            Logger.set_log_level(config["log_level"])
             client = KomariMonitorClient(config)
             await client.run()
         else:
             sys.exit(1)
-            
+
     except KeyboardInterrupt:
-        Logger.info("程序被用户中断")
+        Logger.info("Program interrupted by user")
     except Exception as e:
-        Logger.error(f"程序异常: {e}")
+        Logger.error(f"Program exception: {e}")
         sys.exit(1)
+
 
 if __name__ == "__main__":
     asyncio.run(main())
