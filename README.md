@@ -22,6 +22,20 @@ wget -qO- https://ghfast.top/raw.githubusercontent.com/AlisaCat-S/komari-agent-w
 sudo bash install.sh https://example.com TokenXXXXXXXXXXXX
 ```
 
+## 卸载
+
+一键卸载会停止并移除 systemd 服务 `komari-agent-lite`，并删除 `/opt/komari-lite` 安装目录：
+
+```bash
+wget -qO- https://ghfast.top/raw.githubusercontent.com/AlisaCat-S/komari-agent-webhost-lite/refs/heads/main/uninstall.sh | sudo bash
+```
+
+不使用代理时：
+
+```bash
+wget -qO- https://raw.githubusercontent.com/AlisaCat-S/komari-agent-webhost-lite/refs/heads/main/uninstall.sh | sudo bash
+```
+
 ## 安装脚本参数
 
 | 参数 | 说明 |
